@@ -1,0 +1,7 @@
+# ignore everything in the following folders
+data/*
+.spyproject/*
+*__pycache__*
+
+# ignore extensions
+*.parquet
