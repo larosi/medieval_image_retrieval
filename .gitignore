@@ -1,5 +1,6 @@
 # ignore everything in the following folders
 data/*
+*/bak/*
 .spyproject/*
 *__pycache__*
 
