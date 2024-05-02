@@ -14,7 +14,10 @@ from skimage import io
 import matplotlib.pyplot as plt
 from scipy.spatial.distance import cosine as cos_dist
 from skimage.measure import block_reduce
+from  scipy.ndimage import convolve
 from skimage.measure import label, regionprops
+from sklearn.metrics.pairwise import cosine_distances
+import cv2
 
 
 def get_path_embed(image_filename):
@@ -116,69 +119,109 @@ cls_tokens = np.load(queries_features_path)
 
 num_heads = 1
 feature_dim = 384
+num_pools = 6
+num_patch_pools = 1
+
+use_multiscale_patches = True
+display_images = False
+display_rank = False
 APs = []
 precisions = []
 df_queries.reset_index(inplace=True, names='query_id')
 #df_queries = df_queries[df_queries['size_cat'] == 'big']
+#df_queries = df_queries[df_queries['size_cat'] != 'big']
+#df_queries = df_queries[df_queries['ar_cat'] == 'square']
 #df_queries['c'] = df_queries['class']
 #df_queries = df_queries.groupby('c').first()
 #df_queries = df_queries[df_queries['class'] == 'henri_d']
 df_queries = df_queries.set_index('query_id')
 
 df_queries.sort_index(inplace=True)
+evaluation_results = []
 
 for q_idx, q_row in tqdm(df_queries.iterrows(), total=df_queries.shape[0]):
     query_img = io.imread(os.path.join(queries_folder, q_row['img_path']))
 
     query_cls_token = cls_tokens[q_idx, :].reshape(-1, 1)
     scores = []
-    io.imshow(query_img)
-    io.show()
+    if display_images:
+        io.imshow(query_img)
+        io.show()
     for index, row in df_docs.iterrows():
         patch_embed = get_path_embed(row['img_path'])
-        #if q_row['size_cat'] == 'big':
-        patch_embed = block_reduce(patch_embed, (4, 4, 1), np.mean) 
-        mean_attention = get_mean_attention(query_cls_token, patch_embed,
-                                            num_heads, feature_dim,
-                                            threshold=0.2)
-        masked_attn = mean_attention[mean_attention > 0]
-
-        if len(masked_attn) > 1:
-            display_images = False
-            #display_images = (row['doc_id'] in q_row['documents']) and len(masked_attn) > (query_img.shape[0]//32)**2
-            #display_images = display_images and (masked_attn.max() > 100)
-
-            th = max(np.percentile(masked_attn, 10), 0)
-            labeled_attn = label(mean_attention > th)
-            regions = regionprops(labeled_attn)
-            if display_images:
-                doc_img = io.imread(os.path.join(images_path, row['img_path']))
-                
-                plt.imshow(mean_attention)
-                io.show()
-                io.imshow(doc_img)
-                scale_x = doc_img.shape[1] / mean_attention.shape[1]
-                scale_y = doc_img.shape[0] / mean_attention.shape[0]
-            proposal_distances = [1]
-            for props in regions:
-                ymin, xmin, ymax, xmax = props.bbox
-                if display_images:
-                    xs = np.array([xmin, xmax, xmax, xmin, xmin]) * scale_x
-                    ys = np.array([ymin, ymin, ymax, ymax, ymin]) * scale_y
-                    plt.plot(xs, ys)
-                proposal_token = patch_embed[ymin:ymax,xmin:xmax,:].reshape(-1, feature_dim).mean(axis=0)
-                #proposal_token_norm = square_root_norm(proposal_token.reshape(1,-1))
-                #query_token_norm = square_root_norm(query_cls_token.reshape(1,-1))
-                #dist = np.linalg.norm(proposal_token_norm - query_token_norm)
-                dist = cos_dist(proposal_token, np.squeeze(query_cls_token))
-                proposal_distances.append(dist)
-            if display_images:
-                plt.title(f'dist: {min(proposal_distances)}')
-                plt.show()
-            scores.append(min(proposal_distances))
+        if use_multiscale_patches:
+            multiscale_patch_embeds = []
+            for i in range(0, num_patch_pools):
+                if min(patch_embed.shape) > 3:
+                    if i > 0:
+                        patch_embed = block_reduce(patch_embed, (2, 2, 1), np.mean)
+                        #kernel = np.ones((3, 3, 1)) / 9
+                        #patch_embed = convolve(patch_embed, kernel)[::2, ::2,:]
+                multiscale_patch_embeds.append(patch_embed.reshape(-1, feature_dim))
+            multiscale_patch_embeds = np.vstack(multiscale_patch_embeds)
+            distances = np.linalg.norm(multiscale_patch_embeds - query_cls_token.T, axis=1)
+            #distances = cosine_distances(multiscale_patch_embeds, query_cls_token.T)
+            score = min(np.squeeze(distances))
+            scores.append(score)
         else:
-            scores.append(1)
-
+            mean_attention = get_mean_attention(query_cls_token, patch_embed,
+                                                num_heads, feature_dim,
+                                                threshold=0.2)
+            masked_attn = mean_attention[mean_attention > 0]
+            if len(masked_attn) > 1:
+                #display_images = (row['doc_id'] in q_row['documents']) and len(masked_attn) > (query_img.shape[0]//32)**2
+                #display_images = display_images and (masked_attn.max() > 100)
+    
+                th = max(np.percentile(masked_attn, 10), 0)
+                multiscale_maps = []
+                map_avg_pool = mean_attention
+                map_shape = mean_attention.shape
+                proposal_tokens = []
+                boxes = []
+                for i in range(0, num_pools):
+                    if min(map_avg_pool.shape) > 3:
+                        if i > 0:
+                            map_avg_pool = block_reduce(map_avg_pool, (2, 2), np.mean)
+                        multiscale_maps.append(map_avg_pool)
+                        labeled_attn = label(map_avg_pool > th)
+                        regions = regionprops(labeled_attn)
+                        scale_x = map_shape[1] / map_avg_pool.shape[1]
+                        scale_y = map_shape[0] / map_avg_pool.shape[0]
+                        for props in regions:
+                            ymin, xmin, ymax, xmax = props.bbox
+                            ymin, ymax = int(ymin * scale_y), int(ymax * scale_y)
+                            xmin, xmax = int(xmin * scale_x), int(xmax * scale_x)
+                            boxes.append([[xmin, xmax, xmax, xmin, xmin], [ymin, ymin, ymax, ymax, ymin]])
+                            proposal_token = patch_embed[ymin:ymax, xmin:xmax, :].reshape(-1, feature_dim).mean(axis=0)
+                            proposal_tokens.append(proposal_token)
+                score = 1
+                if len(proposal_tokens) > 0:
+                    proposal_tokens = np.stack(proposal_tokens)
+                    distances = cosine_distances(proposal_tokens, query_cls_token.T)
+                    score = distances.min()
+                    display_images = False#score < min([0.7]+scores)#0.4
+                    if display_images:
+                        doc_img = io.imread(os.path.join(images_path, row['img_path']))
+                        scale_x = doc_img.shape[1] / mean_attention.shape[1]
+                        scale_y = doc_img.shape[0] / mean_attention.shape[0]
+                        for box_i, box in enumerate(boxes):
+                            xs = np.clip(np.array(box[0]) * scale_x, 0, doc_img.shape[0]).astype(int)
+                            ys = np.clip(np.array(box[1]) * scale_y, 0, doc_img.shape[1]).astype(int)
+                            color = (0,0,255)
+                            bbox_text = f"{int((1 - distances[box_i][0]) * 100)}%"
+                            ymin, xmin, ymax, xmax = ys[0], xs[0], ys[2], xs[1]
+    
+                            doc_img = cv2.rectangle(doc_img,
+                                                    (xmin, ymin), (xmax, ymax),
+                                                    color, 2)
+                            y_mid = ymax-(ymax-ymin)//2
+                            x_mid = xmax-(xmax-xmin)//2
+                            doc_img = cv2.putText(doc_img, bbox_text, (x_mid, y_mid),
+                                                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                        io.imshow(doc_img)
+                        plt.title(f'score: {score}')
+                        io.show()
+                    scores.append(score)
     scores = np.array(scores)
     idx_sorted = np.argsort(scores)
 
@@ -186,7 +229,9 @@ for q_idx, q_row in tqdm(df_queries.iterrows(), total=df_queries.shape[0]):
     doc_names = df_docs['doc_id'][idx_sorted]
     doc_names = doc_names.drop_duplicates(keep='first')
     ranking = 1*doc_names.isin(gt_list).values
-
+    
+    results_str = q_row['filename'].split('.')[0] +': '+ ' '.join(doc_names.to_list())
+    evaluation_results.append(results_str)
     top_k = [fn + '.jpg' for fn in doc_names.to_list()[:10]]
     doc_images = [io.imread(os.path.join(dataset_path, fn)) for fn in top_k]
 
@@ -198,9 +243,23 @@ for q_idx, q_row in tqdm(df_queries.iterrows(), total=df_queries.shape[0]):
 
 df_queries['AP'] = APs
 
-df_queries.to_parquet(f'df_queries_mAP_heads_{num_heads}_{feature_dim}.parquet')
+df_queries.to_parquet(f'num_heads_{num_heads}_feature_dim_{feature_dim}_use_multiscale_patches_{use_multiscale_patches}.parquet')
 
 print(f"mAP: {df_queries['AP'].mean()}")
 
 print(df_queries.groupby(['size_cat', 'ar_cat'])['AP'].mean())
 print(df_queries.groupby(['class'])['AP'].mean())
+
+
+with open('results.txt', 'w') as fp:
+    fp.write('\r'.join(evaluation_results))
+
+print(f"mAP: {df_queries['retrieval'].mean()}")
+
+print(df_queries.groupby(['size_cat', 'ar_cat'])['retrieval'].mean())
+print(df_queries.groupby(['class'])['retrieval'].mean())
+
+
+print(f"mAP: {df_queries['mAP'].mean()}")
+print(df_queries.groupby(['size_cat', 'ar_cat'])['mAP'].mean())
+print(df_queries.groupby(['class'])['mAP'].mean())
