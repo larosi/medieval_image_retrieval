@@ -13,6 +13,7 @@ import h5py
 from torchvision import transforms
 from tqdm import tqdm 
 from skimage import io
+from skimage.transform import resize
 import os
 
 
@@ -84,7 +85,7 @@ def add_padding(img_rgb, windows_size):
     pad_h = int(windows_size[0] * np.ceil(h / windows_size[0])) - h
     pad_w = int(windows_size[1] * np.ceil(w / windows_size[1])) - w
     padding_width = ((0, pad_h), (0, pad_w), (0, 0))
-    constant_value = 0 #(0.75811552, 0.7067092 , 0.61939638)
+    constant_value = 0.6 #(0.75811552, 0.7067092 , 0.61939638)
     img_rgb = np.pad(img_rgb, pad_width=padding_width,
                    mode='constant', 
                    constant_values=constant_value)
@@ -96,14 +97,19 @@ def save_features(dataset_filename, image_filename, features):
             del h5f[image_filename]
         dataset_group = h5f.create_group(image_filename)
         dataset_group.create_dataset('features', data=features)
-
+        
+def to_uint8(query):
+    query = (255*query).astype(np.uint8)
+    return query
 
 if __name__ == '__main__':
     images_dir = os.path.join('..', 'data', 'images')
     df_path = os.path.join('..', 'data', 'df_dataset.parquet')
     hdf5_path = os.path.join('..', 'data', 'docs_patch_embed.hdf5')
     df = pd.read_parquet(df_path)
-
+    
+    use_norm_tokens = True
+    use_sliding_window = False
     ratio = (2, 2)
     windows_size = (224*ratio[0], 224*ratio[1])
     grid_shape = (windows_size[0]//14, windows_size[1]//14)
@@ -112,38 +118,58 @@ if __name__ == '__main__':
     device = "cuda" if torch.cuda.is_available() else "cpu"
     mean = (0.485, 0.456, 0.406)
     std = (0.229, 0.224, 0.225)
-    trans = transforms.Compose([transforms.Resize(windows_size[0]),
-                                transforms.CenterCrop(windows_size),
-                                transforms.ToTensor(),
-                                transforms.Normalize(mean, std)])
-
+    if use_sliding_window:
+        trans = transforms.Compose([transforms.Resize(windows_size[0]),
+                                    transforms.CenterCrop(windows_size),
+                                    transforms.ToTensor(),
+                                    transforms.Normalize(mean, std)])
+    else:
+        trans = transforms.Compose([transforms.ToTensor(),
+                                    transforms.Normalize(mean, std)])
     for index, row in tqdm(df.iterrows(), total=df.shape[0]):
         img_rgb = io.imread(os.path.join(images_dir, row['img_path']))
+        if not use_sliding_window:
+            img_rgb = resize(img_rgb, ((img_rgb.shape[0]//14 + 1)*14, (img_rgb.shape[1]//14 + 1)*14))
+            img_rgb = to_uint8(img_rgb)
         h_no_pad, w_no_pad = img_rgb.shape[:2]
-        img_rgb = add_padding(img_rgb, windows_size)
-
+        if use_sliding_window:
+            img_rgb = add_padding(img_rgb, windows_size)
         h_new, w_new = img_rgb.shape[:2]
 
         h_remove = (h_new - h_no_pad) // 14
         w_remove = (w_new - w_no_pad) // 14
-
-        windows = sliding_window(img_rgb, windows_size, stride)
+        if use_sliding_window:
+            windows = sliding_window(img_rgb, windows_size, stride)
+            
+        else:
+            windows = np.expand_dims(img_rgb, axis=0)
         windows_tokens = []
-
         with torch.no_grad():
-            for window_i in range(0, windows.shape[0]):
+            for window_i in range(0, len(windows)):
                 img = Image.fromarray(windows[window_i])
                 img = trans(img)
                 img = torch.unsqueeze(img, dim=0).to(device)
 
                 features = model.forward_features(img)
-                patch_tokens = torch.squeeze(features['x_norm_patchtokens']).cpu().detach().numpy()
+                if use_norm_tokens:
+                    patch_tokens = torch.squeeze(features['x_norm_patchtokens']).cpu().detach().numpy()
+                else:
+                    skip = model.num_register_tokens + 1
+                    patch_tokens = torch.squeeze(features['x_prenorm']).cpu().detach().numpy()[skip:,:]
                 windows_tokens.append(patch_tokens)
-        reconstructed_tokens = tokens_from_windows(windows_tokens,
-                                                   h_new, w_new,
-                                                   grid_shape,
-                                                   windows_size,
-                                                   stride)
-        tokens_h, tokens_w = reconstructed_tokens.shape[0:2]
-        reconstructed_tokens = reconstructed_tokens[:tokens_h-h_remove, :tokens_w-w_remove, :]
+        if use_sliding_window:
+            reconstructed_tokens = tokens_from_windows(windows_tokens,
+                                                       h_new, w_new,
+                                                       grid_shape,
+                                                       windows_size,
+                                                       stride)
+            tokens_h, tokens_w = reconstructed_tokens.shape[0:2]
+            reconstructed_tokens = reconstructed_tokens[:tokens_h-h_remove, :tokens_w-w_remove, :]
+        else:
+            grid_shape = (h_new//14, w_new//14, patch_tokens.shape[-1])
+            reconstructed_tokens = windows_tokens[0].reshape(grid_shape)
+
+        #io.imshow(reconstructed_tokens.mean(axis=-1))
+        #io.show()
+
         save_features(hdf5_path, row['img_path'], reconstructed_tokens)
