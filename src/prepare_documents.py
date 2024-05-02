@@ -13,6 +13,11 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
+from scipy.signal import medfilt
+from skimage.measure import block_reduce
+from scipy.ndimage import binary_closing
+from skimage.filters import threshold_otsu
+from skimage.color import rgb2gray
 
 def sliding_window(image, patch_size, stride):
     height, width = image.shape[:2]
@@ -75,6 +80,76 @@ plt.show()
 sns.scatterplot(data=df[df['orientation'] == 'portait'], y='height', x='width')
 plt.show()
 
+new_data = {'xmin': [], 'xmax': [], 'ymin': [], 'ymax': [], 'laplacian_var': []}
+
+from skimage.filters import laplace
+display_images = False
+display_crop = False
+crop_borders_percentaje = 0.02
+for index, row in tqdm(df.iterrows(), total=df.shape[0]):
+    img_path = os.path.join(dataset_path, row['img_path'])
+    img = io.imread(img_path)
+    img = crop_borders(img, percentaje=crop_borders_percentaje)
+    img_laplacian = rgb2gray(img)
+    img_laplacian = resize(img_laplacian, output_shape=(img.shape[0]/2, img.shape[1]/2))
+    
+    img_laplacian = np.abs(laplace(img_laplacian))
+    if display_images:
+        io.imshow(img)
+        io.show()
+        io.imshow(img_laplacian)
+        io.show()
+    
+    #img_laplacian = img_laplacian.max(axis=-1)
+    for _ in range(0, 4):
+        img_laplacian = block_reduce(img_laplacian, (2, 2), np.max)
+    img_laplacian = medfilt(img_laplacian)
+    th = threshold_otsu(img_laplacian)
+    mask = img_laplacian > min(th, 0.3)
+    mask = binary_closing(mask)
+    if display_images:
+        io.imshow(mask)
+        io.show()
+        io.imshow(img_laplacian)
+        io.show()
+    ys, xs = np.where(mask)
+    scale_x = img.shape[0] / mask.shape[0] 
+    scale_y = img.shape[0] / mask.shape[0]
+    h, w = img.shape[0:2]
+    ymin = max(0, int(min(ys) * scale_y - h*0.05))
+    ymax = min(h, int(max(ys) * scale_y + h*0.1))
+
+    xmin = max(0, int(min(xs) * scale_x - w*0.05))
+    xmax = min(w, int(max(xs) * scale_x + w*0.1))
+
+    img_crop = img[ymin:ymax, xmin:xmax, :]
+    laplacian_var = laplace(img_crop).var()
+    if display_crop:
+        io.imshow(img)
+        io.show()
+        io.imshow(img_crop)
+        io.show()
+    for col in new_data.keys():
+        new_data[col].append(locals()[col])
+
+for col in new_data.keys():
+    df[col] = new_data[col]
+
+df['laplacian_var'].hist()
+plt.show()
+assert -1 == 0
+empty_images_th = np.percentile(df['laplacian_var'], 7)
+for index, row in tqdm(df[df['laplacian_var'] < empty_images_th].iterrows(), total=df.shape[0]):
+    img_path = os.path.join(dataset_path, row['img_path'])
+    img = io.imread(img_path)
+    img = crop_borders(img, percentaje=0.02)
+    io.imshow(img)
+    plt.title(f"{row['laplacian_var']}")
+    io.show()
+
+df = df[df['laplacian_var'] >= empty_images_th]
+
+
 output_folder = os.path.join('..', 'data','images')
 
 df['doc_id'] = df['img_path'].str.split('.').str[0]
@@ -82,7 +157,9 @@ new_rows = []
 for index, row in tqdm(df.iterrows(), total=df.shape[0]):
     img_path = os.path.join(dataset_path, row['img_path'])
     img = io.imread(img_path)
-    img = crop_borders(img, percentaje=0.02)
+    img = crop_borders(img, percentaje=crop_borders_percentaje)
+    xmin, xmax, ymin, ymax = row[['xmin', 'xmax', 'ymin', 'ymax']]
+    img = img[ymin:ymax, xmin:xmax, :]
     h, w = img.shape[0:2]
 
     if row['size'] == 'small':
@@ -112,3 +189,8 @@ for index, row in tqdm(df.iterrows(), total=df.shape[0]):
             new_rows.append(row_copy)
 df = pd.DataFrame(new_rows).reset_index(drop=True)
 df.to_parquet(os.path.join('..', 'data', 'df_dataset.parquet'))
+"""
+fg_images = os.listdir(output_folder)
+df = df[df['img_path'].isin(fg_images)]
+df.reset_index(drop=True, inplace=True)
+"""
