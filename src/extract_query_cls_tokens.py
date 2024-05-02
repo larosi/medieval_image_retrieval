@@ -51,24 +51,35 @@ trans = transforms.Compose([transforms.Resize(224),
                             transforms.CenterCrop((224, 224)),
                             transforms.ToTensor(),
                             transforms.Normalize(mean, std)])
-"""
-trans = transforms.Compose([transforms.ToTensor(),
-                            transforms.Normalize(mean, std)])
-"""
+
+trans_big = transforms.Compose([transforms.ToTensor(),
+                                transforms.Normalize(mean, std)])
+
 features = []
 for index, row in tqdm(df.iterrows(), total=df.shape[0]):
     query = io.imread(os.path.join(queries_folder, row['img_path']))
-    query = pad_query(query)
-    #query = resize(query, ((query.shape[0]//14 + 1)*14, (query.shape[1]//14 + 1)*14))
+    is_big = row['size_cat'] != 'small'
+    if is_big:
+        query = resize(query, ((query.shape[0]//14 + 1)*14, (query.shape[1]//14 + 1)*14))
+    else:    
+        query = pad_query(query)
     #io.imshow(query)
     #io.show()
     query = to_uint8(query)
 
     img = Image.fromarray(query)
-    img = trans(img)
+
+    if is_big:
+        img = trans_big(img)
+    else:
+        img = trans(img)
+
     img = torch.unsqueeze(img, dim=0).to(device)
 
     cls_token = model(img).cpu().detach().numpy()
+    #['x_prenorm'][:,1+4:,:]
+    #patch_tokens = torch.squeeze(model.forward_features(img)['x_norm_patchtokens']).cpu().detach().numpy()
+    #cls_token = patch_tokens.mean(axis=0)
     features.append(cls_token)
 features = np.vstack(features)
 np.save(out_features_path, features)
