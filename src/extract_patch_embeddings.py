@@ -114,7 +114,7 @@ if __name__ == '__main__':
     windows_size = (224*ratio[0], 224*ratio[1])
     grid_shape = (windows_size[0]//14, windows_size[1]//14)
     stride = windows_size[0]
-    model = load_model(backbone_size='small', use_registers=True)
+    model = load_model(backbone_size='base', use_registers=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     mean = (0.485, 0.456, 0.406)
     std = (0.229, 0.224, 0.225)
@@ -128,25 +128,28 @@ if __name__ == '__main__':
                                     transforms.Normalize(mean, std)])
     for index, row in tqdm(df.iterrows(), total=df.shape[0]):
         img_rgb = io.imread(os.path.join(images_dir, row['img_path']))
-        if not use_sliding_window:
-            img_rgb = resize(img_rgb, ((img_rgb.shape[0]//14 + 1)*14, (img_rgb.shape[1]//14 + 1)*14))
-            img_rgb = to_uint8(img_rgb)
-        h_no_pad, w_no_pad = img_rgb.shape[:2]
-        if use_sliding_window:
-            img_rgb = add_padding(img_rgb, windows_size)
-        h_new, w_new = img_rgb.shape[:2]
 
-        h_remove = (h_new - h_no_pad) // 14
-        w_remove = (w_new - w_no_pad) // 14
         if use_sliding_window:
+            h_no_pad, w_no_pad = img_rgb.shape[:2]
+            img_rgb = add_padding(img_rgb, windows_size)
+            h_new, w_new = img_rgb.shape[:2]
+            h_remove = (h_new - h_no_pad) // 14
+            w_remove = (w_new - w_no_pad) // 14
             windows = sliding_window(img_rgb, windows_size, stride)
-            
         else:
+            upscale_factor = 1.0
+            h_new, w_new = (((img_rgb.shape[0]*upscale_factor)//14 + 1)*14, ((img_rgb.shape[1]*upscale_factor)//14 + 1)*14)
+            h_new, w_new = int(h_new), int(w_new)
+            h_remove, w_remove = 0, 0
+            #img_rgb = resize(img_rgb, (((img_rgb.shape[0]*upscale_factor)//14 + 1)*14, ((img_rgb.shape[1]*upscale_factor)//14 + 1)*14))
+            #img_rgb = to_uint8(img_rgb)
             windows = np.expand_dims(img_rgb, axis=0)
         windows_tokens = []
         with torch.no_grad():
             for window_i in range(0, len(windows)):
                 img = Image.fromarray(windows[window_i])
+                if not use_sliding_window:
+                    img = img.resize((h_new, w_new))
                 img = trans(img)
                 img = torch.unsqueeze(img, dim=0).to(device)
 
@@ -169,7 +172,9 @@ if __name__ == '__main__':
             grid_shape = (h_new//14, w_new//14, patch_tokens.shape[-1])
             reconstructed_tokens = windows_tokens[0].reshape(grid_shape)
 
-        #io.imshow(reconstructed_tokens.mean(axis=-1))
+        #io.imshow(img_rgb)
+        #io.show()
+        #io.imshow(reconstructed_tokens[:,:,0:3])
         #io.show()
 
         save_features(hdf5_path, row['img_path'], reconstructed_tokens)
