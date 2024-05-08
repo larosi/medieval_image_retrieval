@@ -42,7 +42,7 @@ df_path = os.path.join('..', 'data', 'df_queries.parquet')
 out_features_path = os.path.join('..', 'data', 'queries_cls_tokens.npy')
 df = pd.read_parquet(df_path)
 
-model = load_model(backbone_size='small', use_registers=True)
+model = load_model(backbone_size='base', use_registers=True)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 mean = (0.485, 0.456, 0.406)
 std = (0.229, 0.224, 0.225)
@@ -58,28 +58,31 @@ trans_big = transforms.Compose([transforms.ToTensor(),
 features = []
 for index, row in tqdm(df.iterrows(), total=df.shape[0]):
     query = io.imread(os.path.join(queries_folder, row['img_path']))
-    is_big = row['size_cat'] != 'small'
+    is_big = True #row['size_cat'] != 'small'
     if is_big:
-        query = resize(query, ((query.shape[0]//14 + 1)*14, (query.shape[1]//14 + 1)*14))
+        query = resize(query, (((query.shape[0])//14 + 1)*14, ((query.shape[1])//14 + 1)*14))
     else:    
-        query = pad_query(query)
+        upscale_factor = 1
+        query = resize(query, (((query.shape[0]*upscale_factor)//14 + 1)*14, ((query.shape[1]*upscale_factor)//14 + 1)*14))
+        #query = pad_query(query)
     #io.imshow(query)
     #io.show()
     query = to_uint8(query)
 
     img = Image.fromarray(query)
-
+    img = trans_big(img)
+    """
     if is_big:
         img = trans_big(img)
     else:
         img = trans(img)
-
+    """
     img = torch.unsqueeze(img, dim=0).to(device)
 
-    cls_token = model(img).cpu().detach().numpy()
+    #cls_token = model(img).cpu().detach().numpy()
     #['x_prenorm'][:,1+4:,:]
-    #patch_tokens = torch.squeeze(model.forward_features(img)['x_norm_patchtokens']).cpu().detach().numpy()
-    #cls_token = patch_tokens.mean(axis=0)
+    patch_tokens = torch.squeeze(model.forward_features(img)['x_norm_patchtokens']).cpu().detach().numpy()
+    cls_token = patch_tokens.mean(axis=0)
     features.append(cls_token)
 features = np.vstack(features)
 np.save(out_features_path, features)
